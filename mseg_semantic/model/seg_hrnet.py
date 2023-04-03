@@ -29,7 +29,8 @@ from omegaconf import OmegaConf
 from mseg_semantic.model.seg_hrnet_config import HRNetArchConfig, HRNetStageConfig
 
 
-BatchNorm2d = torch.nn.SyncBatchNorm
+# BatchNorm2d = torch.nn.SyncBatchNorm
+BatchNorm2d = torch.nn.BatchNorm2d
 BN_MOMENTUM = 0.01
 logger = logging.getLogger(__name__)
 
@@ -294,12 +295,13 @@ blocks_dict = {"BASIC": BasicBlock, "BOTTLENECK": Bottleneck}
 
 
 class HighResolutionNet(nn.Module):
-    def __init__(self, config: HRNetArchConfig, criterion: nn.Module, n_classes: int) -> None:
+    def __init__(self, config: HRNetArchConfig, criterion: nn.Module, n_classes: int, fl_bgremoval=False) -> None:
         """ """
         super(HighResolutionNet, self).__init__()
 
         self.criterion = criterion
         self.n_classes = n_classes
+        self.fl_bgremoval = fl_bgremoval
 
         # stem net
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=2, padding=1, bias=False)
@@ -352,6 +354,19 @@ class HighResolutionNet(nn.Module):
                 padding=1 if config.FINAL_CONV_KERNEL == 3 else 0,
             ),
         )
+
+        if fl_bgremoval:
+            self.last_layer = nn.Sequential(
+                *self.last_layer[:-1],
+                nn.Conv2d(in_channels=720, out_channels=256, kernel_size=1, stride=1, padding=0, bias=False),
+                BatchNorm2d(256, momentum=BN_MOMENTUM),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(in_channels=256, out_channels=64, kernel_size=1, stride=1, padding='same', bias=False),
+                BatchNorm2d(64, momentum=BN_MOMENTUM),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(in_channels=64, out_channels=1, kernel_size=1, stride=1, padding='same'),
+            )
+
 
     def _make_transition_layer(
         self, num_channels_pre_layer: List[int], num_channels_cur_layer: List[int]
@@ -455,7 +470,7 @@ class HighResolutionNet(nn.Module):
         input size by bilinear upsampling for both training and testing.
         """
         x_size = x.size()
-        assert (x_size[2] - 1) % 8 == 0 and (x_size[3] - 1) % 8 == 0
+        # assert (x_size[2] - 1) % 8 == 0 and (x_size[3] - 1) % 8 == 0
         # h = int((x_size[2] - 1) / 8 * self.zoom_factor + 1)
         h = x_size[2]
         w = x_size[3]
@@ -505,7 +520,7 @@ class HighResolutionNet(nn.Module):
 
         # Bilinear upsampling of output
         x = F.interpolate(x, size=(h, w), mode="bilinear", align_corners=True)
-        if self.training:
+        if self.training and not self.fl_bgremoval:
             main_loss = self.criterion(x, y)
             return x.max(1)[1], main_loss, main_loss * 0
         else:
@@ -590,9 +605,6 @@ def get_configured_hrnet(
 
 if __name__ == "__main__":
     """ """
-    import pdb
-
-    pdb.set_trace()
     imagenet_ckpt_fpath = ""
     load_imagenet_model = False
     model = get_configured_hrnet(180, load_imagenet_model, imagenet_ckpt_fpath)
